@@ -1,0 +1,11 @@
+RedCapUrl <- Sys.getenv("RedCapUrl")
+TokenArchive <- Sys.getenv("TokenArchive")
+TokenBroken <- Sys.getenv("TokenBroken")
+InLoc <- Sys.getenv("InLoc")
+OutLoc <- Sys.getenv("OutLoc")
+Token2024 <- Sys.getenv("Token2024")
+TokenSix <- Sys.getenv("TokenSix")
+Tokenc3 <- Sys.getenv("Tokenc3")
+Tokenca <- Sys.getenv("Tokenca")
+
+options(rstudio.help.showDataPreview = FALSE)
