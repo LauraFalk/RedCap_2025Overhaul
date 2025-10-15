@@ -173,19 +173,20 @@ vax3 <- vax2 %>%
   # remove impossible dates
   mutate(across(c(survey_date, onset_date, archive_firstvaxdate,vax_date, vaxbeforedate, vaxafterdate ), as.Date),
          across(c(before_vax, after_vax, vax_number, archive_firstvaxdatetype), as.numeric),
-         across(c(survey_date, onset_date, archive_firstvaxdate,vax_date, vaxbeforedate, vaxafterdate), DateDelete)) %>%
-  
+         across(c(survey_date, onset_date, archive_firstvaxdate,vax_date, vaxbeforedate, vaxafterdate), DateDelete),
+         across(c(survey_date, onset_date, archive_firstvaxdate,vax_date, vaxbeforedate, vaxafterdate), as.Date)) %>%
+
   # consolidate all vaccines
-  mutate(vaxbeforedate = ifelse(!is.na(before_vax) & before_vax == 1, as.Date(survey_date), as.Date(vaxbeforedate)),
-         vaxafterdate = ifelse(!is.na(after_vax) & after_vax == 1, as.Date(onset_date)-1, as.Date(vaxafterdate)),
-         vax_date = ifelse(!is.na(vax_number) & vax_number >= 1, as.Date(survey_date), as.Date(vax_date))) %>%
-  
+  mutate(vaxbeforedate = ifelse(is.na(vaxbeforedate) & before_vax == 1, survey_date, vaxbeforedate),
+         vaxafterdate = ifelse(is.na(vaxafterdate) & after_vax == 1, onset_date-1, vaxafterdate),
+         vax_date = ifelse(!is.na(vax_number) & vax_number >= 1, survey_date, vax_date),
+         across(c(survey_date, onset_date, archive_firstvaxdate,vax_date, vaxbeforedate, vaxafterdate), as.Date)) %>%
   rowwise() %>%
   mutate(       
          firstvaxdate = ifelse(!all(is.na(c(vax_date, vaxbeforedate, vaxafterdate, archive_firstvaxdate))),
                               min(c(vax_date, vaxbeforedate, vaxafterdate,archive_firstvaxdate), na.rm = T ), NA),
          firstvaxdate = as.Date(firstvaxdate)
-         ) %>%
+         )  %>%
   ungroup() %>%
   group_by(record_id) %>%
   mutate(
@@ -220,7 +221,7 @@ vax3 <- vax2 %>%
   ungroup() %>%
   select(record_id, firstvaxdate, firstvaxdatetype) %>%
   unique() %>%
-  mutate(firstvaxdatetype = ifelse(is.na(firstvaxdatetype), 99, firstvaxdatetype))
+  mutate(firstvaxdatetype = ifelse(is.na(firstvaxdatetype), 99, firstvaxdatetype)) 
 ```
 
 ```{r}
@@ -236,10 +237,33 @@ vax3 <- vax2 %>%
 #   filter(firstvaxdate != pascv)
 ```
 
+```{r}
+# Flags and admin variables are only kept in redcap event 000_arm_1, so they are pulled separately to filter the main dataset.
+vaccines <- redcap_read_oneshot(
+  redcap_uri = RedCapUrl,
+  token = Token2024,
+  guess_type = FALSE,
+  fields =  c('record_id','firstvaxdate','firstvaxdatetype'),
+  filter = "[000_arm_1][covhort_survey_complete] = '2' and [000_arm_1][remove(1)]<>1 and [000_arm_1][remove(2)]<>1 and [000_arm_1][dup]<>1 and [000_arm_1][possiblespam]<>1",
+  events = '000_arm_1',
+  export_checkbox_label = TRUE,
+  export_survey_fields = FALSE
+)
+vaccines <- vaccines$data  
+
+```
+
+```{r}
+vax_update <- vax3 %>%
+  left_join(vaccines %>% rename(firstvaxdateo = firstvaxdate, firstvaxdatetypeo = firstvaxdatetype), by = "record_id") %>%
+  filter(firstvaxdateo != firstvaxdate) %>%
+  select(record_id, firstvaxdate, firstvaxdatetype)
+```
 
 
 ```{r}
-redcap_write(vax3,
+#redcap_write(
+    vax_update,
     batch_size = 50L,
     interbatch_delay = 0.5,
     continue_on_error = FALSE,
