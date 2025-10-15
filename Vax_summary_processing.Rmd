@@ -1,0 +1,253 @@
+---
+title: "Vax_summary_processing"
+author: "Laura Falk"
+date: "2025-10-14"
+output: html_document
+---
+# Vaccine processing 
+
+Vaccinations were determined using two variables vaccine date and vaccine date type (indicating data quality.)
+
+*Vaccine date* was logically attributed using all prior data from the participant. This includes on-cycle surveys, tpcc surveys, and archival one-off surveys. Vaccines were preferentially treated as follows:
+
+- 1. First vaccine date provided on vaccine one-off survey
+- 2. Earliest date from: 
+  - provided vaccination dates
+  - survey date where a positive vaccination status was indicated (unknown before or after infection) but no date provided
+  - day before onset date where a positive vaccination status was indicated before onset date but no date provided
+  - survey date where a positive vaccination status was indicated after onset date but no date provided
+  
+Incomplete dates were attributed with the last day of the month, last month of the year, and year of survey pending what was missing. Data was not attributed when no vaccines were attributed. 
+
+no date is provided for individuals indicating negative vaccine status, and status is left until a positive vaccination status is noted regardless of number of surveys completed since this indication. Participants are asked about vaccine status on each survey. 
+
+*vaccine date type* indicates which of the above logic was used to attribute the vaccination date value.
+
+
+
+# Housekeeping
+```{r setup, include=FALSE}
+library(lubridate)
+library(tidyverse)
+library(REDCapR)
+library(redcapAPI)
+
+readRenviron(".Renviron")
+source('./.Rprofile')
+
+ddold <- redcap_metadata_read(
+  RedCapUrl,
+  Token2024,
+  forms = NULL,
+  fields = NULL,
+  verbose = TRUE,
+  config_options = NULL)
+ddold <- ddold$data
+
+
+vaccinefields <- ddold %>%
+  filter(field_type != "descriptive" & str_detect(form_name,"covhort|tpcc|admin|consent$")) %>%
+  filter(field_name == "record_id" | str_detect(field_name, "vax_|vaccine|vac|vaxdate|complete_dt|complete_manual|start_dt|server_date|pos1_mon|pos1_day|pos1_yr|testdate")) %>%
+  filter(!field_name %in% c("lastvaxdate", "consent_server_date") ) %>%
+  pull(field_name)
+
+vax_data <- redcap_read_oneshot(
+  # Populates from .rEnviron
+  redcap_uri = RedCapUrl,
+  # Populates from .rEnviron
+  token = Token2024,
+  # False may alleviate some parsing issues, TRUE may increase push speed.
+  guess_type = FALSE,
+  # form filter
+  fields = vaccinefields,
+  # records = (admin_data %>% pull(record_id)),
+  export_survey_fields = TRUE
+)
+vax_data <- vax_data$data 
+
+datecols <- colnames(vax_data)[str_detect(colnames(vax_data), "timestamp|complete_dt|complete_manual|start_dt|server_date")]
+# Define your desired order
+pattern_order <- c("timestamp", "complete_dt", "complete_manual", "start_dt", "server_date")
+
+# Filter to matching values, then arrange by the order in pattern_order
+datecols <- map(pattern_order, ~datecols[str_detect(datecols, .x)]) %>%
+  flatten_chr()
+
+
+vax <- vax_data %>%
+  select(-matches("(_uk|_dk|test)$"), -redcap_repeat_instance, -redcap_repeat_instance, -redcap_survey_identifier) %>%
+  filter(!if_all(-c(1, 2), is.na)) %>%
+  mutate(survey_date = reduce(across(all_of(datecols)), coalesce)) %>%
+  select(-all_of(datecols)) %>%
+  # any number
+  mutate(across(everything(), ~na_if(.x, '99')),
+         across(everything(), ~na_if(.x, '88')),
+         vax_number = reduce(across(contains("vax_num")), coalesce) 
+         ) %>%
+  select(-ends_with("_num")) %>%
+
+  select(record_id, redcap_event_name, survey_date, vax_number, ends_with('before'), ends_with('after'), starts_with("archive"), matches("before_"), matches("after_"), matches("vacc_dt"), matches("pos1"), matches("testdate")) %>%
+  
+  # vax before, works because only one value per row
+  mutate(vax_before_month = reduce(across(matches("_before_mon")), coalesce),
+         vax_before_year = reduce(across(matches("_before_yr")), coalesce),
+         vax_after_month = reduce(across(matches("_after_mon")), coalesce),
+         vax_after_year = reduce(across(matches("_after_yr")), coalesce),
+         pos1_month = reduce(across(matches("_pos1_mon")), coalesce),
+         pos1_day = reduce(across(matches("_pos1_day")), coalesce),
+         pos1_year = reduce(across(matches("_pos1_yr")), coalesce),
+         vax_date = reduce(across(matches("_vacc_dt")), coalesce),
+         before_vax = reduce(across(ends_with("before")), coalesce),
+         after_vax = reduce(across(ends_with("after")), coalesce),
+         testdate_vax = reduce(across(ends_with("testdate")), coalesce),
+         ) %>%
+  
+  select(-ends_with("_mon"), -ends_with("_yr"), -ends_with("vacc_dt"), -ends_with('before'), -ends_with('after'), -ends_with('testdate') )
+
+vax2 <- vax %>%
+# Vax before
+  mutate(
+    # Convert month name to month number; will be NA if month is missing
+    month_num = match(vax_before_month, month.name),
+    
+    # Attribute last value of the month as a date
+    vaxbeforedate = ifelse(!is.na(month_num) & !is.na(vax_before_year),
+                           format(as.Date(make_date(vax_before_year, month_num, 1) %m+% months(1) - days(1)), "%Y-%m-%d"),
+                           ifelse(is.na(month_num) & !is.na(vax_before_year),
+  as.Date(paste0(vax_before_year, "-12-31"), format = "%Y-%m-%d"),
+  as.Date(NA)
+)),
+    vaxbeforedate = format(as.Date(vaxbeforedate), "%Y-%m-%d"),
+    
+    # handle missing and impossible by using known dates   
+     survey_date = as.Date(survey_date)) %>%
+
+# Vax after  
+    mutate(
+      month_num = match(vax_after_month, month.name),
+    
+    # Attribute last value of the month as a date
+    vaxafterdate = ifelse(!is.na(month_num) & !is.na(vax_after_year),
+                           format(as.Date(make_date(vax_after_year, month_num, 1) %m+% months(1) - days(1)), "%Y-%m-%d"),
+                           ifelse(is.na(month_num) & !is.na(vax_after_year),
+  as.Date(paste0(vax_after_year, "-12-31"), format = "%Y-%m-%d"),
+  as.Date(NA)
+)),
+    vaxafterdate = format(as.Date(vaxafterdate), "%Y-%m-%d")) %>%
+  
+    mutate(
+    pos1_month = match(pos1_month, month.name),
+    # Step 1: Check if we have at least one part of the date
+    has_any_pos1 = !is.na(pos1_day) | !is.na(pos1_month) | !is.na(pos1_year),
+
+    # Step 2: Fill missing year only if some other date parts exist
+    pos1_year_filled = case_when(
+      !is.na(pos1_year) ~ as.numeric(pos1_year),
+      has_any_pos1 ~ as.numeric(year(survey_date)),
+      TRUE ~ NA
+    ),
+
+    # Step 3: Fill missing month and day as per your rules
+    pos1_month_filled = if_else(is.na(pos1_month) & has_any_pos1, 12, pos1_month),
+    pos1_day_filled = if_else(is.na(pos1_day) & has_any_pos1, 1, as.numeric(pos1_day)),
+
+    # Step 4: Build temporary date
+    temp_date = make_date(pos1_year_filled, pos1_month_filled, pos1_day_filled),
+
+    # Step 5: If day is missing but we had other parts, set to last day of month
+    onset_date = case_when(
+      has_any_pos1 & is.na(pos1_day) ~(ceiling_date(temp_date, "month") - days(1)),
+      has_any_pos1 ~ temp_date,
+      !is.na(testdate_vax) ~ as.Date(testdate_vax),
+      TRUE ~ as.Date(NA)
+    )
+  ) %>%
+  
+  select(record_id, redcap_event_name, survey_date, onset_date, vax_number, archive_firstvaxdate, archive_firstvaxdatetype, vax_date, before_vax, vaxbeforedate, after_vax, vaxafterdate)
+
+# Create Date Function to remove dates outside of expected range
+DateDelete <- function(x) { if_else(x < as.Date('2019-01-01') | x > Sys.Date()+30 , NA, x)
+}
+
+vax3 <- vax2 %>%
+  # remove impossible dates
+  mutate(across(c(survey_date, onset_date, archive_firstvaxdate,vax_date, vaxbeforedate, vaxafterdate ), as.Date),
+         across(c(before_vax, after_vax, vax_number, archive_firstvaxdatetype), as.numeric),
+         across(c(survey_date, onset_date, archive_firstvaxdate,vax_date, vaxbeforedate, vaxafterdate), DateDelete)) %>%
+  
+  # consolidate all vaccines
+  mutate(vaxbeforedate = ifelse(!is.na(before_vax) & before_vax == 1, as.Date(survey_date), as.Date(vaxbeforedate)),
+         vaxafterdate = ifelse(!is.na(after_vax) & after_vax == 1, as.Date(onset_date)-1, as.Date(vaxafterdate)),
+         vax_date = ifelse(!is.na(vax_number) & vax_number >= 1, as.Date(survey_date), as.Date(vax_date))) %>%
+  
+  rowwise() %>%
+  mutate(       
+         firstvaxdate = ifelse(!all(is.na(c(vax_date, vaxbeforedate, vaxafterdate, archive_firstvaxdate))),
+                              min(c(vax_date, vaxbeforedate, vaxafterdate,archive_firstvaxdate), na.rm = T ), NA),
+         firstvaxdate = as.Date(firstvaxdate)
+         ) %>%
+  ungroup() %>%
+  group_by(record_id) %>%
+  mutate(
+    firstvaxdate = {
+      # Check for archive type 3 and available dates
+      has_type3 <- any(archive_firstvaxdatetype == 3, na.rm = TRUE)
+      type3_dates <- archive_firstvaxdate[archive_firstvaxdatetype == 3]
+
+      if (has_type3 && any(!is.na(type3_dates))) {
+        rep(min(type3_dates, na.rm = TRUE), n())
+      } else if (any(!is.na(firstvaxdate))) {
+        rep(min(firstvaxdate, na.rm = TRUE), n())
+      } else {
+        rep(as.Date(NA), n())
+      }
+    }
+  ) %>%
+  ungroup() %>%
+  
+  
+  mutate(
+    firstvaxdatetype = case_when(
+      !is.na(archive_firstvaxdatetype) & archive_firstvaxdatetype == 3 ~ 3,
+      !is.na(firstvaxdate) & firstvaxdate == archive_firstvaxdate ~ archive_firstvaxdatetype,
+      !is.na(firstvaxdate) & firstvaxdate == survey_date ~ 2,
+      !is.na(firstvaxdate) & firstvaxdate != survey_date ~ 1,
+      is.na(firstvaxdate) & vax_number == 0 ~ 0 ,
+      TRUE ~ NA)) %>%
+  
+  group_by(record_id) %>%
+  mutate(firstvaxdatetype =ifelse(!all(is.na(firstvaxdatetype)), min(firstvaxdatetype, na.rm = T), NA)) %>%
+  ungroup() %>%
+  select(record_id, firstvaxdate, firstvaxdatetype) %>%
+  unique() %>%
+  mutate(firstvaxdatetype = ifelse(is.na(firstvaxdatetype), 99, firstvaxdatetype))
+```
+
+```{r}
+# OLDVAX <- read.csv("C:\\Users\\palacila\\Desktop\\PASC_v2\\Outputs\\PASC_TPCCMerge_20251013.csv")
+# 
+# oldvax<- OLDVAX %>%
+#   select(record_id, firstvaxdate, firstvaxdatetype) %>%
+#   unique() %>%
+#   rename(pascv = firstvaxdate, pascvt = firstvaxdatetype) %>%
+#   left_join((vax3 %>% filter(!str_detect(record_id, "elly")) %>% mutate(record_id = as.integer(record_id))), by = "record_id") %>%
+#   mutate(firstvaxdate =as.Date(firstvaxdate),
+#          pascv = as.Date(pascv)) %>%
+#   filter(firstvaxdate != pascv)
+```
+
+
+
+```{r}
+redcap_write(vax3,
+    batch_size = 50L,
+    interbatch_delay = 0.5,
+    continue_on_error = FALSE,
+    redcap_uri = RedCapUrl,
+    token = Token2024,
+    # ENSURE THIS IS FALSE
+    overwrite_with_blanks = FALSE,
+    convert_logical_to_integer = FALSE,
+    verbose = TRUE,
+    config_options = NULL)
+```
